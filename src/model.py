@@ -60,11 +60,11 @@ class CausalGraphLayer(nn.Module):
     Layer for learning causal relationships between nodes
     Optimization: Uses basis decomposition to significantly reduce memory usage
     """
-    def __init__(self, N, C, num_bases=4):
+    def __init__(self, N, d_model, num_bases=4):
         super().__init__()
         self.N = N
-        self.C = C
-        self.num_bases = min(num_bases, C)
+        self.d_model = d_model
+        self.num_bases = min(num_bases, d_model)
 
         # Structure matrix: learns generic connection patterns (N x N)
         self.adjacency = nn.Parameter(torch.eye(N) + torch.randn(N, N) * 0.01)
@@ -73,7 +73,7 @@ class CausalGraphLayer(nn.Module):
         self.basis_weights = nn.Parameter(torch.randn(self.num_bases, N, N) * 0.02)
         
         # Channel coefficients: how each channel combines basis patterns (C x K)
-        self.channel_coeffs = nn.Parameter(torch.randn(C, self.num_bases)) 
+        self.channel_coeffs = nn.Parameter(torch.randn(d_model, self.num_bases)) 
         
         self.register_buffer('static_mask', torch.ones(N, N))
 
@@ -113,28 +113,28 @@ class GeoDCDLayer(nn.Module):
     """
     Basic unit combining Transformer and Graph for GeoDCD
     """
-    def __init__(self, N, latent_C=8, d_model=64, nhead=4, num_layers=2, num_bases=4):
+    def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4):
         super().__init__()
         self.N = N
-        self.C = latent_C
-        self.geo_encoder = CausalTransformerBlock(input_dim=1, output_dim=latent_C, 
+        self.d_model = d_model
+        self.geo_encoder = CausalTransformerBlock(input_dim=1, output_dim=d_model, 
                                                 d_model=d_model, nhead=nhead, num_layers=num_layers)
-        self.decoder = CausalTransformerBlock(input_dim=latent_C, output_dim=1, 
+        self.decoder = CausalTransformerBlock(input_dim=d_model, output_dim=1, 
                                                 d_model=d_model, nhead=nhead, num_layers=num_layers)
-        self.graph = CausalGraphLayer(N, latent_C, num_bases=num_bases)
+        self.graph = CausalGraphLayer(N, d_model, num_bases=num_bases)
 
     def forward(self, x, mask=None):
         B, N, T = x.shape
         # Encoder: x -> z
-        z = self.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, self.C)
+        z = self.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, self.d_model)
         # Reconstruction: z -> x_recon
-        x_recon = self.decoder(z.view(B*N, T, self.C)).view(B, N, T)
+        x_recon = self.decoder(z.view(B*N, T, self.d_model)).view(B, N, T)
         
         # Dynamics: z_t -> z_{t+1} (Mask for local window restriction)
         zhat_next = self.graph(z, dynamic_mask=mask)
         
         # Prediction: z_{t+1} -> x_{t+1}
-        x_pred = self.decoder(zhat_next[..., :-1, :].contiguous().view(B*N, T-1, self.C)).view(B, N, T-1)
+        x_pred = self.decoder(zhat_next[..., :-1, :].contiguous().view(B*N, T-1, self.d_model)).view(B, N, T-1)
         return x_recon, x_pred, z
 
 # --- 3. Geometric Pooler ---
@@ -179,7 +179,7 @@ class GeometricPooler(nn.Module):
 
 # --- 4. Main Model (Geometric Dynamic Causal Discovery) ---
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], latent_C=8, d_model=64, num_bases=4):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
@@ -197,7 +197,7 @@ class GeoDCD(nn.Module):
         
         for i in range(self.num_levels):
             # Each layer uses Basis Decomposition to save memory
-            self.layers.append(GeoDCDLayer(N=self.dims[i], latent_C=latent_C, d_model=d_model, num_bases=num_bases))
+            self.layers.append(GeoDCDLayer(N=self.dims[i], d_model=d_model, num_bases=num_bases))
             
             if i < self.num_levels - 1:
                 # Geometric Pooler for patch merging

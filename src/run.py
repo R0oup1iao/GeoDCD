@@ -59,21 +59,20 @@ def main(args):
         accelerator.print(f"🚀 Experiment: {args.dataset} | Out: {args.output_dir}")
 
     # Data loading
-    train_loader, val_loader, meta = get_data_context(args)
+    train_loader, _, meta = get_data_context(args)
     
     # Model initialization
     model = GeoDCD(
         N=args.N, 
         coords=meta['coords'], 
         hierarchy=args.hierarchy, 
-        latent_C=args.latent_C, 
         d_model=args.d_model,
         num_bases=args.num_bases
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    model, optimizer, train_loader, val_loader = accelerator.prepare(
-        model, optimizer, train_loader, val_loader
+    model, optimizer, train_loader = accelerator.prepare(
+        model, optimizer, train_loader
     )
 
     # Training loop (Unified Stage)
@@ -85,8 +84,7 @@ def main(args):
         if accelerator.is_main_process:
             log_dict = {"train/loss": loss}
             
-            # Real-time Fine Graph evaluation
-            if meta.get('gt_fine') is not None:
+            if (meta.get('gt_fine') is not None) and (meta['gt_fine'].ndim==2):
                 unwrapped = accelerator.unwrap_model(model)
                 est_fine = unwrapped.layers[0].graph.get_soft_graph().detach().cpu().numpy()
                 metrics = count_accuracy(meta['gt_fine'], est_fine)
@@ -123,7 +121,6 @@ if __name__ == "__main__":
     
     # Model
     parser.add_argument("--hierarchy", type=int, nargs='+', default=[32, 8])
-    parser.add_argument("--latent_C", type=int, default=8)
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
     

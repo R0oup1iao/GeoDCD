@@ -71,6 +71,8 @@ def evaluate_static_graphs(model, meta, output_dir, metrics=None):
     gt_fine = meta.get('gt_fine')
     if gt_fine is None:
         gt_fine = np.zeros_like(est_fine) 
+    if gt_fine.ndim == 3:
+        gt_fine = np.max(gt_fine, axis=0)
     
     coords = meta['coords']
     
@@ -117,6 +119,8 @@ def run_full_evaluation(model, args, accelerator, meta):
         
         est_fine = model.layers[0].graph.get_soft_graph().detach().cpu().numpy()
         gt_fine = meta.get('gt_fine')
+        if gt_fine.ndim == 3:
+            gt_fine = np.max(gt_fine, axis=0)
         
         metrics = {}
         if gt_fine is not None:
@@ -215,7 +219,6 @@ if __name__ == "__main__":
     parser.add_argument("--norm_coords", action="store_true")
     parser.add_argument("--window_size", type=int, default=10)
     parser.add_argument("--hierarchy", type=int, nargs='+', default=[32, 8])
-    parser.add_argument("--latent_C", type=int, default=8)
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default="./results")
@@ -238,7 +241,6 @@ if __name__ == "__main__":
         N=args.N, 
         coords=meta['coords'], 
         hierarchy=args.hierarchy, 
-        latent_C=args.latent_C, 
         d_model=args.d_model,
         num_bases=args.num_bases
     )
