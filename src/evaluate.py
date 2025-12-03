@@ -119,11 +119,11 @@ def run_full_evaluation(model, args, accelerator, meta):
         
         est_fine = model.layers[0].graph.get_soft_graph().detach().cpu().numpy()
         gt_fine = meta.get('gt_fine')
-        if gt_fine.ndim == 3:
-            gt_fine = np.max(gt_fine, axis=0)
         
         metrics = {}
         if gt_fine is not None:
+            if gt_fine.ndim == 3:
+                gt_fine = np.max(gt_fine, axis=0)
             metrics = count_accuracy(gt_fine, est_fine)
             accelerator.print("Static Metrics:", json.dumps(metrics, indent=4))
             
@@ -270,10 +270,10 @@ if __name__ == "__main__":
 python src/evaluate.py \
     --dataset SD \
     --data_path data/real \
-    --model_path ./results/SD/20251128_234020/model.pth\
+    --model_path ./results/SD/20251202_143548/model.pth\
     --N 716 \
-    --hierarchy 64 8 \
-    --window_size 12
+    --hierarchy 32 8 \
+    --window_size 13
     
 accelerate launch src/evaluate.py \
     --dataset GBA \
@@ -290,5 +290,12 @@ python src/evaluate.py \
     --N 3834 \
     --hierarchy 64 8 \
     --window_size 12
-
+    
+python src/evaluate.py \
+    --dataset GLA \
+    --data_path data/real \
+    --model_path ./results/GLA/20251203_003131/model.pth\
+    --N 3834 \
+    --hierarchy 128 32 8 \
+    --window_size 13
 """
