@@ -141,7 +141,7 @@ def run_full_evaluation(model, args, accelerator, meta):
     accelerator.wait_for_everyone()
 
     # 2. Dynamic graph inference (only main process)
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and args.dynamic:
         accelerator.print(f"\nComputing Dynamic Graph (Jacobian)...")
         try:
             base_path = getattr(args, 'data_path', 'data/synthetic')
@@ -156,7 +156,7 @@ def run_full_evaluation(model, args, accelerator, meta):
             full_loader = torch.utils.data.DataLoader(full_ds, batch_size=1, shuffle=False)
             
             all_strengths = []
-            max_frames = 300  # Can be increased for smoother GIF
+            max_frames = args.num_frames  # Can be increased for smoother GIF
             frames_generated = 0
             
             # OOM prevention: Chunk Size
@@ -218,7 +218,9 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=128)
     parser.add_argument("--norm_coords", action="store_true")
     parser.add_argument("--window_size", type=int, default=10)
-    parser.add_argument("--hierarchy", type=int, nargs='+', default=[32, 8])
+    parser.add_argument("--hierarchy", type=int, nargs='+', default=[])
+    parser.add_argument("--dynamic", action="store_true")
+    parser.add_argument("--num_frames", type=int, default=300)
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default="./results")

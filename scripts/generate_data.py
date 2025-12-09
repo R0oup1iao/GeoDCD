@@ -2,7 +2,10 @@ import os
 import argparse
 import numpy as np
 from scipy.integrate import odeint
+import scipy.spatial.distance as dist
+import networkx as nx
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 import logging
 
 # Set up logging
@@ -23,7 +26,32 @@ def save_data(data, ground_truth, coords, base_path, dataset_name, replica_id):
     np.save(gt_file, ground_truth)
     np.save(coords_file, coords)
     
-    logging.info(f"Saved replica {replica_id} to {data_dir} | Data: {data.shape}, GT: {ground_truth.shape}, Coords: {coords.shape}")
+    plt.figure(figsize=(10, 8))
+    if ground_truth.ndim == 2:
+        rows, cols = np.where(ground_truth != 0)
+        for r, c in zip(rows, cols):
+            plt.plot([coords[r, 0], coords[c, 0]], 
+                     [coords[r, 1], coords[c, 1]], 
+                     color='gray', alpha=0.2, linewidth=0.8, zorder=1)
+
+    # Draw Nodes
+    plt.scatter(coords[:, 0], coords[:, 1], c='steelblue', s=200, edgecolors='white', linewidth=1.5, zorder=2)
+    
+    # Annotate Node Indices
+    for idx in range(coords.shape[0]):
+        plt.text(coords[idx, 0], coords[idx, 1], str(idx), 
+                 fontsize=9, color='white', ha='center', va='center', fontweight='bold', zorder=3)
+    
+    plt.title(f"Layout Preview: {dataset_name} (Replica {replica_id})\nShape: {data.shape}")
+    plt.axis('equal') # Keep aspect ratio to represent geometry correctly
+    plt.grid(True, linestyle=':', alpha=0.6)
+    
+    # Save Plot
+    plot_file = os.path.join(data_dir, f'layout_preview_{replica_id}.png')
+    plt.savefig(plot_file, dpi=100, bbox_inches='tight')
+    plt.close() # Close figure to free memory
+    
+    logging.info(f"Saved replica {replica_id} and preview to {data_dir}")
 
 # ==========================================
 # 1. Lorenz 96 & Cluster Lorenz
@@ -287,6 +315,85 @@ def generate_nc_expanded(p, T, seed):
     
     return final_data, all_gt, final_coords
 
+# ==========================================
+# 4. VAR with NetworkX Coordinates
+# ==========================================
+
+def make_var_stationary(beta, radius=0.97):
+    '''Rescale coefficients of VAR model to make stable.'''
+    p = beta.shape[0]
+    lag = beta.shape[1] // p
+    bottom = np.hstack((np.eye(p * (lag - 1)), np.zeros((p * (lag - 1), p))))
+    beta_tilde = np.vstack((beta, bottom))
+    eigvals = np.linalg.eigvals(beta_tilde)
+    max_eig = max(np.abs(eigvals))
+    nonstationary = max_eig > radius
+    if nonstationary:
+        return make_var_stationary(0.95 * beta, radius)
+    else:
+        return beta
+
+def simulate_spatial_var(p, T, lag=2, neighbors=3, beta_scale=1.0, sd=0.1, seed=0):
+    """
+    生成基于几何距离的 VAR 模型。
+    1. 先生成坐标。
+    2. 每个节点只连接最近的 'neighbors' 个点。
+    3. 系数大小与距离成反比。
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    coords = np.random.uniform(0, 10, size=(p, 2))
+    dists = dist.cdist(coords, coords, metric='euclidean')
+    
+    GC = np.eye(p, dtype=int) 
+    beta = np.zeros((p, p))
+    np.fill_diagonal(beta, 0.4) 
+
+    for i in range(p):
+        nearest_indices = np.argsort(dists[i])[1 : neighbors + 1]
+        
+        for neighbor_j in nearest_indices:
+            dist_val = dists[i, neighbor_j]
+            weight = np.exp(-dist_val**2 / 10.0) 
+            sign = np.random.choice([1, -1])
+            coeff = sign * beta_scale * weight / np.sqrt(neighbors)
+            
+            beta[i, neighbor_j] = coeff
+            GC[i, neighbor_j] = 1
+    beta_full_list = [beta]
+    for l in range(1, lag):
+        decay_factor = 0.2 ** l
+        beta_lag = np.eye(p) * 0.2 * decay_factor
+        beta_full_list.append(beta_lag)
+
+    beta_concat = np.hstack(beta_full_list)
+    beta_final = make_var_stationary(beta_concat)
+    burn_in = 200
+    errors = np.random.normal(scale=sd, size=(p, T + burn_in))
+    X = np.zeros((p, T + burn_in))
+    X[:, :lag] = errors[:, :lag]
+    
+    for t in range(lag, T + burn_in):
+        hist = X[:, (t-lag):t].flatten(order='F')
+        X[:, t] = np.dot(beta_final, hist) + errors[:, t]
+
+    return X.T[burn_in:], beta_final, GC, coords
+
+
+def generate_var_system(p, T, lag=2, sparsity=None, seed=0):
+    if sparsity is None:
+        k = 4
+    else:
+        k = int(p * sparsity)
+        if k < 2: k = 2
+        if k > 10: k = 10
+    
+    X, beta, GC, coords = simulate_spatial_var(
+        p, T, lag=lag, neighbors=k, beta_scale=0.9, seed=seed
+    )
+    
+    return X, GC, coords
+
 
 # ==========================================
 # Main Execution
@@ -295,13 +402,16 @@ def generate_nc_expanded(p, T, seed):
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic datasets for GeoDCD.")
     parser.add_argument('--dataset', type=str, required=True, 
-                        choices=['lorenz96', 'cluster_lorenz', 'tvsem', 'nc'],
+                        choices=['lorenz96', 'cluster_lorenz', 'tvsem', 'nc', 'var'],
                         help='Name of the dataset to generate.')
     parser.add_argument('--num_replicas', type=int, default=5, help='Number of replicas to generate.')
     parser.add_argument('--output_path', type=str, default='data/synthetic', help='Base path to save the data.')
     parser.add_argument('--T', type=int, default=1000, help='Time steps.')
     parser.add_argument('--p', type=int, default=32, help='Total number of variables (nodes).')
+    
     parser.add_argument('--num_groups', type=int, default=4, help='Number of groups for cluster_lorenz.')
+    parser.add_argument('--var_lag', type=int, default=2, help='Lag order for VAR model.')
+    parser.add_argument('--var_sparsity', type=float, default=0.03, help='Sparsity for VAR coefficients.')
     
     args = parser.parse_args()
 
@@ -310,21 +420,25 @@ def main():
         logging.info(f"--- Generating {args.dataset}, Replica {i+1}/{args.num_replicas} (seed={seed}) ---")
 
         if args.dataset == 'lorenz96':
-            # Classic single ring
             data, gt, coords = generate_lorenz96_system(p=args.p, T=args.T, F=10, seed=seed)
             
         elif args.dataset == 'cluster_lorenz':
-            # Multiple independent rings
             data, gt, coords = generate_cluster_lorenz(p=args.p, T=args.T, seed=seed, num_groups=args.num_groups)
             
         elif args.dataset == 'tvsem':
-            # Expanded TVSEM (multiple switching pairs)
             data, gt, coords = generate_tvsem_expanded(p=args.p, T=args.T, seed=seed)
             
         elif args.dataset == 'nc':
-            # Expanded NC (multiple NC8 blocks)
-            # Use 'nc' instead of 'nc8' to indicate it can be arbitrary size
             data, gt, coords = generate_nc_expanded(p=args.p, T=args.T, seed=seed)
+        
+        elif args.dataset == 'var':
+            data, gt, coords = generate_var_system(
+                p=args.p, 
+                T=args.T, 
+                lag=args.var_lag, 
+                sparsity=args.var_sparsity, 
+                seed=seed
+            )
             
         else:
             raise ValueError("Unknown dataset.")

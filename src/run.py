@@ -120,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--stride", type=int, default=1)
     
     # Model
-    parser.add_argument("--hierarchy", type=int, nargs='+', default=[32, 8])
+    parser.add_argument("--hierarchy", type=int, nargs='+', default=[])
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
     
@@ -130,6 +130,10 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lambda_l1", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
+    
+    # Evaluation
+    parser.add_argument("--dynamic", action="store_true")
+    parser.add_argument("--num_frames", type=int, default=300)
 
     # Logging
     parser.add_argument("--output_dir", type=str, default="./results")
