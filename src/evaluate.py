@@ -156,7 +156,7 @@ def run_full_evaluation(model, args, accelerator, meta):
             full_loader = torch.utils.data.DataLoader(full_ds, batch_size=1, shuffle=False)
             
             all_strengths = []
-            max_frames = 200  # Can be increased for smoother GIF
+            max_frames = 300  # Can be increased for smoother GIF
             frames_generated = 0
             
             # OOM prevention: Chunk Size
