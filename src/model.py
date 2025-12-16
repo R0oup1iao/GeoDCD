@@ -66,7 +66,7 @@ class CausalGraphLayer(nn.Module):
         self.max_k = max_k
 
         # Params: Structure (N, max_k), Bases (K, N, max_k), Coeffs (C, K)
-        self.adjacency = nn.Parameter(torch.ones(N, max_k) + torch.randn(N, max_k) * 0.01)
+        self.adjacency = nn.Parameter(torch.ones(N, max_k) * 0.5 + torch.randn(N, max_k) * 0.01)
         self.basis_weights = nn.Parameter(torch.randn(self.num_bases, N, max_k) * 0.02)
         self.channel_coeffs = nn.Parameter(torch.randn(d_model, self.num_bases))
         
@@ -77,11 +77,13 @@ class CausalGraphLayer(nn.Module):
         B, N, T, C = z.shape
         k_curr = neighbor_indices.size(1)
         
-        if k_curr > self.max_k: raise ValueError(f"k ({k_curr}) > max_k ({self.max_k})")
-        
         # Cache for visualization
         self.last_neighbor_indices = neighbor_indices
 
+        if k_curr > self.max_k: 
+            neighbor_indices = neighbor_indices[:, :self.max_k]
+            k_curr = self.max_k
+        
         # Dynamic slicing
         bases = self.basis_weights[:, :, :k_curr]
         adj = self.adjacency[:, :k_curr]
@@ -90,33 +92,33 @@ class CausalGraphLayer(nn.Module):
         eff_weights = torch.einsum('ck,knm->cnm', self.channel_coeffs, bases)
         edge_weights = eff_weights * adj.unsqueeze(0)
         
-        # Gather neighbors: (B, N, k, T, C)
-        z_neigh = z[:, neighbor_indices]
+        # Gather neighbors using fancy indexing
+        flat_indices = neighbor_indices.view(-1) # (N*k)
+        z_flat = z.view(B, N, -1) # (B, N, T*C)
+        z_neigh_flat = z_flat[:, flat_indices, :]
+        z_neigh = z_neigh_flat.view(B, N, k_curr, T, C)
         
-        # Weighted Sum: weights (1, N, k, 1, C) * z_neigh
+        # Weighted Sum
         w_aligned = edge_weights.permute(1, 2, 0).unsqueeze(0).unsqueeze(3)
         z_out = (z_neigh * w_aligned).sum(dim=2)
         
         return torch.tanh(z_out)
 
     def get_soft_graph(self):
-        """Reconstruct dense NxN adjacency for visualization."""
+        """Reconstruct dense NxN adjacency."""
         if self.last_neighbor_indices is None: return None
         
         with torch.no_grad():
             indices = self.last_neighbor_indices
             k = indices.size(1)
-            
-            # Recompute scalar weight magnitude: (N, k)
             bases = self.basis_weights[..., :k]
             W = torch.einsum('ck,knm->cnm', self.channel_coeffs, bases)
             W_mag = W.abs().mean(dim=0)
             sparse_w = self.adjacency[:, :k].abs() * W_mag
             
-            # Scatter to dense
             dense = torch.zeros(self.N, self.N, device=self.adjacency.device)
             dense.scatter_(1, indices, sparse_w)
-            return dense.t()
+            return dense
 
     def structural_l1_loss(self):
         return torch.sum(torch.abs(self.adjacency))
@@ -126,34 +128,27 @@ class CausalGraphLayer(nn.Module):
 # ==========================================
 
 class GeoDCDLayer(nn.Module):
-    """Combines Temporal (Transformer) and Spatial (Graph) modeling."""
     def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4, max_k=32):
         super().__init__()
         self.geo_encoder = CausalTransformerBlock(1, d_model, d_model, nhead, num_layers)
-        self.pred_head = nn.Linear(d_model, 1)
+        self.decoder = CausalTransformerBlock(d_model, 1, d_model, nhead, num_layers)
         self.graph = CausalGraphLayer(N, d_model, max_k, num_bases)
 
     def forward(self, x, mask):
         B, N, T = x.shape
-        # Temporal Encode -> z
         z = self.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, -1)
-        
-        # Spatial Dynamics: z_t -> z_{t+1}
+        x_recon = self.decoder(z.view(B*N, T, -1)).view(B, N, T)
         zhat_next = self.graph(z, neighbor_indices=mask)
-        
-        # Prediction: z_{t+1} -> x_{t+1} (Causal slicing [:-1])
-        x_pred = self.pred_head(
-            zhat_next[..., :-1, :].squeeze(-1)
+        x_pred = self.decoder(
+            zhat_next[..., :-1, :].contiguous().view(B*N, T-1, -1)
         ).view(B, N, T-1)
-        
-        return x_pred, z
+        return x_recon, x_pred, z
 
 # ==========================================
 # 4. Pooling Layer
 # ==========================================
 
 class GeometricPooler(nn.Module):
-    """Physical coordinate pooling using K-Means."""
     def __init__(self, num_patches):
         super().__init__()
         self.num_patches = num_patches
@@ -162,23 +157,16 @@ class GeometricPooler(nn.Module):
 
     def init_structure(self, coords):
         if self.initialized: return
-        
-        # Coordinate normalization
         coords_np = coords.detach().float().cpu().numpy()
         c_mean = coords_np.mean(axis=0)
         c_std = coords_np.std(axis=0) + 1e-5
         coords_norm = (coords_np - c_mean) / c_std
-        
-        # K-Means & Hard Assignment
         kmeans = KMeans(n_clusters=self.num_patches, n_init=20, random_state=42)
         labels = kmeans.fit_predict(coords_norm)
-        
-        # Generate Hard Assignment S (N, K)
         N = coords.shape[0]
         S_hard = torch.zeros(N, self.num_patches, device=coords.device)
         labels_tensor = torch.tensor(labels, device=coords.device).long()
         S_hard.scatter_(1, labels_tensor.unsqueeze(1), 1.0)
-        
         self.S_matrix = S_hard
         self.initialized = True
         print(f"🔲 Geometric Window Initialized: N={N} -> K={self.num_patches}")
@@ -188,15 +176,22 @@ class GeometricPooler(nn.Module):
         return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 # ==========================================
-# 5. Main Model
+# 5. Main Model (Soft Constrained Top-Down)
 # ==========================================
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, max_k=32):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
-        self.max_k = max_k
+        self.max_k = 32 
+        
+        # Soft Penalty Factor: 
+        # A value of 5.0 means unconnected parent regions are effectively 
+        # "pushed away" by 6x their original distance.
+        # This preserves local neighbors (0.1 * 6 = 0.6, still close)
+        # but suppresses far ones (2.0 * 6 = 12.0, pushed out of TopK)
+        self.penalty_factor = 5.0 
         
         coords = torch.tensor(coords).float() if not torch.is_tensor(coords) else coords
         self.register_buffer('coords', coords)
@@ -205,11 +200,10 @@ class GeoDCD(nn.Module):
         self.poolers = nn.ModuleList()
         
         for i in range(self.num_levels):
-            # Graph Layer
+            current_max_k = min(self.max_k, self.dims[i])
             self.layers.append(
-                GeoDCDLayer(self.dims[i], d_model, num_bases=num_bases, max_k=self.max_k)
+                GeoDCDLayer(self.dims[i], d_model, num_bases=num_bases, max_k=current_max_k)
             )
-            # Pooler (except last)
             if i < self.num_levels - 1:
                 self.poolers.append(GeometricPooler(self.dims[i+1]))
                 self.register_buffer(f'structure_S_{i}', torch.zeros(self.dims[i], self.dims[i+1]))
@@ -217,44 +211,76 @@ class GeoDCD(nn.Module):
     def get_structural_l1_loss(self):
         return sum(layer.graph.structural_l1_loss() for layer in self.layers)
 
-    def _get_knn_indices(self, coords, k, shift=False):
-        if shift and self.training:
-            coords = coords + torch.randn_like(coords) * 0.05 * coords.std(0, keepdim=True)
-            
+    def _get_knn_indices(self, coords, k, coarse_graph=None, structure_S=None):
+        # 1. Physical Distances
         dists = torch.cdist(coords, coords)
-        _, indices = torch.topk(dists, min(k, coords.shape[0]), dim=1, largest=False)
+        
+        # 2. Top-Down Soft Constraint
+        if (coarse_graph is not None) and (structure_S is not None):
+            parents = structure_S.argmax(dim=1)
+            # Use lower threshold to capture weak signals
+            coarse_bin = (coarse_graph > 0.001).float() 
+            prior_mask = coarse_bin[parents][:, parents]
+            
+            # Ensure self-block connectivity
+            same_parent = (parents.unsqueeze(1) == parents.unsqueeze(0)).float()
+            prior_mask = torch.max(prior_mask, same_parent)
+            
+            # Apply Multiplicative Penalty
+            # D_new = D_old * (1 + beta * (1 - Mask))
+            penalty = 1.0 + self.penalty_factor * (1.0 - prior_mask)
+            dists = dists * penalty
+
+        # 3. Select Top-K
+        if self.training and coarse_graph is None:
+             dists = dists + torch.randn_like(dists) * 0.01
+             
+        k = min(k, coords.shape[0])
+        _, indices = torch.topk(dists, k, dim=1, largest=False)
         return indices
 
-    def forward(self, x, tau=1.0):
+    def forward(self, x):
+        # Stage 1: Bottom-Up Aggregation
         xs, curr_coords = [x], self.coords
         coords_list, S_list = [curr_coords], []
         
-        # --- Bottom-up: Aggregation ---
         for i in range(self.num_levels - 1):
             S = self.poolers[i](xs[-1], curr_coords)
-            S_list.append(S)
+            S_list.append(S[0]) 
             with torch.no_grad(): getattr(self, f'structure_S_{i}').copy_(S[0])
             
-            # Aggregate X and Coords
             S_norm = S[0] / (S[0].sum(0, keepdim=True) + 1e-6)
-            xs.append(torch.matmul(xs[-1].permute(0,2,1), S_norm).permute(0,2,1))
+            x_next = torch.matmul(xs[-1].permute(0,2,1), S_norm).permute(0,2,1)
+            xs.append(x_next)
+            
             curr_coords = torch.mm(S_norm.t(), curr_coords)
             coords_list.append(curr_coords)
             
-        # --- Multi-scale Causal Discovery ---
-        results = []
-        for i in range(self.num_levels):
+        # Stage 2: Top-Down Causal Discovery
+        results_dict = {}
+        upper_level_graph = None 
+        
+        for i in reversed(range(self.num_levels)):
+            current_S = S_list[i] if i < len(S_list) else None 
             target_k = min(self.max_k, self.dims[i])
-            mask = self._get_knn_indices(coords_list[i], target_k, shift=(i > 0))
             
-            x_pred, _ = self.layers[i](xs[i], mask=mask)
+            mask = self._get_knn_indices(
+                coords=coords_list[i], 
+                k=target_k, 
+                coarse_graph=upper_level_graph, 
+                structure_S=current_S
+            )
             
-            results.append({
+            x_rec, x_pred, _ = self.layers[i](xs[i], mask=mask)
+            upper_level_graph = self.layers[i].graph.get_soft_graph()
+            
+            results_dict[i] = {
                 'level': i,
+                'x_rec': x_rec,
                 'x_pred': x_pred,
                 'x_target': xs[i],
-                'S': S_list[i] if i < len(S_list) else None,
+                'S': current_S,
                 'k_used': target_k
-            })
+            }
             
-        return results
+        return [results_dict[i] for i in range(self.num_levels)]

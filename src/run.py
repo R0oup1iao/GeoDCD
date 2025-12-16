@@ -73,10 +73,10 @@ def main(args):
         hierarchy=args.hierarchy, 
         d_model=args.d_model,
         num_bases=args.num_bases,
-        max_k=args.max_k
+        # max_k=args.max_k
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     model, optimizer, train_loader = accelerator.prepare(
         model, optimizer, train_loader
     )
