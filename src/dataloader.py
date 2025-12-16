@@ -111,9 +111,7 @@ def get_data_context(args):
 
     meta = {
         "coords": coords_np,
-        "gt_fine": gt_np,
-        "gt_coarse": None, 
-        "patch_ids": None
+        "gt_fine": gt_np
     }
     
     return train_loader, val_loader, meta

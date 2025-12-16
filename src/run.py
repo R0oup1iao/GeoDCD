@@ -60,7 +60,13 @@ def main(args):
 
     # Data loading
     train_loader, _, meta = get_data_context(args)
-    
+    if args.N is None:
+        sample_data = train_loader.dataset[0]
+    if isinstance(sample_data, (list, tuple)):
+        args.N = sample_data[0].shape[0] 
+    else:
+        args.N = sample_data.shape[0]
+        
     # Model initialization
     model = GeoDCD(
         N=args.N, 
@@ -114,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="lorenz96")
     parser.add_argument("--data_path", type=str, default="data/synthetic")
     parser.add_argument("--replica_id", type=int, default=0)
-    parser.add_argument("--N", type=int, default=128)
+    parser.add_argument("--N", type=int, default=None)
     parser.add_argument("--norm_coords", action="store_true")
     parser.add_argument("--window_size", type=int, default=10)
     parser.add_argument("--stride", type=int, default=1)
