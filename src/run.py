@@ -27,10 +27,9 @@ def train_one_epoch(model, loader, optimizer, accelerator, args):
         batch_loss = 0.0
         # Accumulate losses for each layer (Recon + Pred)
         for res in results:
-            x_rec, x_pred, x_target = res['x_rec'], res['x_pred'], res['x_target']
-            l_rec = F.mse_loss(x_rec, x_target)
+            x_pred, x_target = res['x_pred'], res['x_target']
             l_pre = F.mse_loss(x_pred, x_target[..., 1:])
-            batch_loss += (l_rec + l_pre)
+            batch_loss += l_pre
 
         # Structural sparsity loss (L1)
         l1_loss = args.lambda_l1 * accelerator.unwrap_model(model).get_structural_l1_loss()
@@ -73,7 +72,8 @@ def main(args):
         coords=meta['coords'], 
         hierarchy=args.hierarchy, 
         d_model=args.d_model,
-        num_bases=args.num_bases
+        num_bases=args.num_bases,
+        max_k=args.max_k
     )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -129,6 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--hierarchy", type=int, nargs='+', default=[])
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
+    parser.add_argument("--max_k", type=int, default=32)
     
     # Training
     parser.add_argument("--batch_size", type=int, default=64)

@@ -130,7 +130,7 @@ class GeoDCDLayer(nn.Module):
     def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4, max_k=32):
         super().__init__()
         self.geo_encoder = CausalTransformerBlock(1, d_model, d_model, nhead, num_layers)
-        self.decoder = CausalTransformerBlock(d_model, 1, d_model, nhead, num_layers)
+        self.pred_head = nn.Linear(d_model, 1)
         self.graph = CausalGraphLayer(N, d_model, max_k, num_bases)
 
     def forward(self, x, mask):
@@ -138,18 +138,15 @@ class GeoDCDLayer(nn.Module):
         # Temporal Encode -> z
         z = self.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, -1)
         
-        # Reconstruction
-        x_recon = self.decoder(z.view(B*N, T, -1)).view(B, N, T)
-        
         # Spatial Dynamics: z_t -> z_{t+1}
         zhat_next = self.graph(z, neighbor_indices=mask)
         
         # Prediction: z_{t+1} -> x_{t+1} (Causal slicing [:-1])
-        x_pred = self.decoder(
-            zhat_next[..., :-1, :].contiguous().view(B*N, T-1, -1)
+        x_pred = self.pred_head(
+            zhat_next[..., :-1, :].squeeze(-1)
         ).view(B, N, T-1)
         
-        return x_recon, x_pred, z
+        return x_pred, z
 
 # ==========================================
 # 4. Pooling Layer
@@ -195,11 +192,11 @@ class GeometricPooler(nn.Module):
 # ==========================================
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, max_k=32):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
-        self.max_k = 32 # Global Graph Capacity
+        self.max_k = max_k
         
         coords = torch.tensor(coords).float() if not torch.is_tensor(coords) else coords
         self.register_buffer('coords', coords)
@@ -250,11 +247,10 @@ class GeoDCD(nn.Module):
             target_k = min(self.max_k, self.dims[i])
             mask = self._get_knn_indices(coords_list[i], target_k, shift=(i > 0))
             
-            x_rec, x_pred, _ = self.layers[i](xs[i], mask=mask)
+            x_pred, _ = self.layers[i](xs[i], mask=mask)
             
             results.append({
                 'level': i,
-                'x_rec': x_rec,
                 'x_pred': x_pred,
                 'x_target': xs[i],
                 'S': S_list[i] if i < len(S_list) else None,
