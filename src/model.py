@@ -110,18 +110,17 @@ class GeoDCDLayer(nn.Module):
     def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4, max_k=32):
         super().__init__()
         self.geo_encoder = CausalTransformerBlock(1, d_model, d_model, nhead, num_layers)
-        self.decoder = CausalTransformerBlock(d_model, 1, d_model, nhead, num_layers)
+        self.pred_head = nn.Linear(d_model, 1)
         self.graph = CausalGraphLayer(N, d_model, max_k, num_bases)
 
     def forward(self, x, mask):
         B, N, T = x.shape
         z = self.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, -1)
-        x_recon = self.decoder(z.view(B*N, T, -1)).view(B, N, T)
         zhat_next = self.graph(z, neighbor_indices=mask)
-        x_pred = self.decoder(
-            zhat_next[..., :-1, :].contiguous().view(B*N, T-1, -1)
+        x_pred = self.pred_head(
+            zhat_next[..., :-1, :].squeeze(-1)
         ).view(B, N, T-1)
-        return x_recon, x_pred, z
+        return x_pred, z
 
 class GeometricPooler(nn.Module):
     def __init__(self, num_patches, shift_scale=0.1):
@@ -239,12 +238,11 @@ class GeoDCD(nn.Module):
                 structure_S=current_S
             )
             
-            x_rec, x_pred, _ = self.layers[i](xs[i], mask=mask)
+            x_pred, _ = self.layers[i](xs[i], mask=mask)
             upper_level_graph = self.layers[i].graph.get_soft_graph()
-            
+
             results_dict[i] = {
                 'level': i,
-                'x_rec': x_rec,
                 'x_pred': x_pred,
                 'x_target': xs[i],
                 'S': current_S,
