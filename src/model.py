@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import KMeans
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -48,15 +48,15 @@ class CausalTransformerBlock(nn.Module):
         return self.output_proj(out)
 
 class CausalGraphLayer(nn.Module):
-    def __init__(self, N, d_model, max_k=32, num_bases=4):
+    def __init__(self, N, d_model, num_bases=4):
         super().__init__()
         self.N = N
         self.d_model = d_model
         self.num_bases = min(num_bases, d_model)
-        self.max_k = max_k
+        self.max_k = 1000  # Large fixed max_k to handle variable neighbors
 
-        self.adjacency = nn.Parameter(torch.ones(N, max_k) * 0.5 + torch.randn(N, max_k) * 0.01)
-        self.basis_weights = nn.Parameter(torch.randn(self.num_bases, N, max_k) * 0.02)
+        self.adjacency = nn.Parameter(torch.ones(N, self.max_k) * 0.5 + torch.randn(N, self.max_k) * 0.01)
+        self.basis_weights = nn.Parameter(torch.randn(self.num_bases, N, self.max_k) * 0.02)
         self.channel_coeffs = nn.Parameter(torch.randn(d_model, self.num_bases))
 
         self.register_buffer('last_neighbor_indices', None)
@@ -66,10 +66,6 @@ class CausalGraphLayer(nn.Module):
         k_curr = neighbor_indices.size(1)
 
         self.last_neighbor_indices = neighbor_indices
-
-        if k_curr > self.max_k:
-            neighbor_indices = neighbor_indices[:, :self.max_k]
-            k_curr = self.max_k
 
         bases = self.basis_weights[:, :, :k_curr]
         adj = self.adjacency[:, :k_curr]
@@ -107,11 +103,11 @@ class CausalGraphLayer(nn.Module):
         return torch.sum(torch.abs(self.adjacency))
 
 class GeoDCDLayer(nn.Module):
-    def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4, max_k=32):
+    def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4):
         super().__init__()
         self.geo_encoder = CausalTransformerBlock(1, d_model, d_model, nhead, num_layers)
         self.pred_head = nn.Linear(d_model, 1)
-        self.graph = CausalGraphLayer(N, d_model, max_k, num_bases)
+        self.graph = CausalGraphLayer(N, d_model, num_bases)
 
     def forward(self, x, mask):
         B, N, T = x.shape
@@ -139,7 +135,7 @@ class GeometricPooler(nn.Module):
             shift = np.random.randn(*coords_norm.shape) * self.shift_scale
             coords_norm += shift
 
-        kmeans = MiniBatchKMeans(n_clusters=self.num_patches, random_state=None)
+        kmeans = KMeans(n_clusters=self.num_patches, random_state=None)
         labels = kmeans.fit_predict(coords_norm)
 
         N = coords.shape[0]
@@ -160,11 +156,10 @@ class GeometricPooler(nn.Module):
             return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, max_k=32, penalty_factor=5.0):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
-        self.max_k = max_k
         self.penalty_factor = penalty_factor
 
         coords = torch.tensor(coords).float() if not torch.is_tensor(coords) else coords
@@ -174,9 +169,8 @@ class GeoDCD(nn.Module):
         self.poolers = nn.ModuleList()
 
         for i in range(self.num_levels):
-            current_max_k = min(self.max_k, self.dims[i])
             self.layers.append(
-                GeoDCDLayer(self.dims[i], d_model, num_bases=num_bases, max_k=current_max_k)
+                GeoDCDLayer(self.dims[i], d_model, num_bases=num_bases)
             )
             if i < self.num_levels - 1:
                 self.poolers.append(GeometricPooler(self.dims[i+1]))
@@ -185,7 +179,7 @@ class GeoDCD(nn.Module):
     def get_structural_l1_loss(self):
         return sum(layer.graph.structural_l1_loss() for layer in self.layers)
 
-    def _get_knn_indices(self, coords, k, coarse_graph=None, structure_S=None):
+    def _get_knn_indices(self, coords, coarse_graph=None, structure_S=None):
         dists = torch.cdist(coords, coords)
 
         if (coarse_graph is not None) and (structure_S is not None):
@@ -202,7 +196,11 @@ class GeoDCD(nn.Module):
         if self.training and coarse_graph is None:
              dists = dists + torch.randn_like(dists) * 0.01
 
-        k = min(k, coords.shape[0])
+        # Use threshold to filter neighbors
+        threshold = dists.mean() + self.penalty_factor * dists.std()
+        dists = torch.where(dists <= threshold, dists, torch.tensor(float('inf'), device=dists.device))
+
+        k = coords.shape[0]
         _, indices = torch.topk(dists, k, dim=1, largest=False)
         return indices
 
@@ -225,19 +223,17 @@ class GeoDCD(nn.Module):
             
         # Stage 2: Top-Down Causal Discovery
         results_dict = {}
-        upper_level_graph = None 
-        
+        upper_level_graph = None
+
         for i in reversed(range(self.num_levels)):
-            current_S = S_list[i] if i < len(S_list) else None 
-            target_k = min(self.max_k, self.dims[i])
-            
+            current_S = S_list[i] if i < len(S_list) else None
+
             mask = self._get_knn_indices(
-                coords=coords_list[i], 
-                k=target_k, 
-                coarse_graph=upper_level_graph, 
+                coords=coords_list[i],
+                coarse_graph=upper_level_graph,
                 structure_S=current_S
             )
-            
+
             x_pred, _ = self.layers[i](xs[i], mask=mask)
             upper_level_graph = self.layers[i].graph.get_soft_graph()
 
@@ -246,7 +242,7 @@ class GeoDCD(nn.Module):
                 'x_pred': x_pred,
                 'x_target': xs[i],
                 'S': current_S,
-                'k_used': target_k
+                'k_used': coords_list[i].shape[0]
             }
             
         return [results_dict[i] for i in range(self.num_levels)]

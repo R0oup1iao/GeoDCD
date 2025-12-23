@@ -69,7 +69,6 @@ def main(args):
         hierarchy=args.hierarchy,
         d_model=args.d_model,
         num_bases=args.num_bases,
-        max_k=args.max_k,
         penalty_factor=args.penalty_factor
     )
 
@@ -124,7 +123,6 @@ if __name__ == "__main__":
     parser.add_argument("--hierarchy", type=int, nargs='+', default=[])
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
-    parser.add_argument("--max_k", type=int, default=32)
     parser.add_argument("--penalty_factor", type=float, default=5.0)
     
     # Training
