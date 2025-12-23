@@ -8,6 +8,7 @@ import numpy as np
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from tqdm.auto import tqdm
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from model import GeoDCD
 from dataloader import get_data_context
@@ -35,6 +36,8 @@ def train_one_epoch(model, loader, optimizer, accelerator, args):
         final_loss = batch_loss + l1_loss
 
         accelerator.backward(final_loss)
+        if accelerator.sync_gradients:
+             accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += final_loss.item()
 
@@ -72,7 +75,8 @@ def main(args):
         penalty_factor=args.penalty_factor
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     model, optimizer, train_loader = accelerator.prepare(
         model, optimizer, train_loader
     )
@@ -82,17 +86,21 @@ def main(args):
     for ep in progress_bar:
         loss = train_one_epoch(model, train_loader, optimizer, accelerator, args)
 
+        # Update learning rate
+        scheduler.step()
+
         if accelerator.is_main_process:
-            log_dict = {"train/loss": loss}
+            current_lr = optimizer.param_groups[0]['lr']
+            log_dict = {"train/loss": loss, "train/lr": current_lr}
 
             if (meta.get('gt_fine') is not None) and (meta['gt_fine'].ndim==2):
                 unwrapped = accelerator.unwrap_model(model)
                 est_fine = unwrapped.layers[0].graph.get_soft_graph().detach().cpu().numpy()
                 metrics = count_accuracy(meta['gt_fine'], est_fine)
                 log_dict.update(metrics)
-                postfix_str = f"L={loss:.4f}, F1={metrics['F1']:.3f}, AUC={metrics['AUROC']:.3f}"
+                postfix_str = f"L={loss:.4f}, F1={metrics['F1']:.3f}, AUC={metrics['AUROC']:.3f}, LR={current_lr:.1e}"
             else:
-                postfix_str = f"L={loss:.4f}"
+                postfix_str = f"L={loss:.4f}, LR={current_lr:.1e}"
 
             wandb.log(log_dict)
             progress_bar.set_postfix_str(postfix_str)
