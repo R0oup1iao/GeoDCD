@@ -3,11 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-from sklearn.cluster import KMeans
-
-# ==========================================
-# 1. Basic Components
-# ==========================================
+from sklearn.cluster import MiniBatchKMeans
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -20,16 +16,15 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
+        return x + self.pe[:, :x.size(1)]
 
 class CausalTransformerBlock(nn.Module):
-    """Transformer Encoder with Causal Mask caching."""
     def __init__(self, input_dim, output_dim, d_model=64, nhead=4, num_layers=2, dropout=0.1):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=d_model*2, 
+            d_model=d_model, nhead=nhead, dim_feedforward=d_model*2,
             dropout=dropout, batch_first=True, norm_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -44,20 +39,15 @@ class CausalTransformerBlock(nn.Module):
         B, T, C = x.shape
         x = self.input_proj(x)
         x = self.pos_encoder(x)
-        
+
         if not hasattr(self, 'causal_mask') or self.causal_mask.size(0) != T:
             mask = self._generate_square_subsequent_mask(T).to(x.device)
             self.register_buffer('causal_mask', mask, persistent=False)
-            
+
         out = self.transformer(x, mask=self.causal_mask, is_causal=True)
         return self.output_proj(out)
 
-# ==========================================
-# 2. Core Graph Layer
-# ==========================================
-
 class CausalGraphLayer(nn.Module):
-    """Sparse Causal Graph Layer (O(Nk)) with basis decomposition."""
     def __init__(self, N, d_model, max_k=32, num_bases=4):
         super().__init__()
         self.N = N
@@ -65,49 +55,42 @@ class CausalGraphLayer(nn.Module):
         self.num_bases = min(num_bases, d_model)
         self.max_k = max_k
 
-        # Params: Structure (N, max_k), Bases (K, N, max_k), Coeffs (C, K)
         self.adjacency = nn.Parameter(torch.ones(N, max_k) * 0.5 + torch.randn(N, max_k) * 0.01)
         self.basis_weights = nn.Parameter(torch.randn(self.num_bases, N, max_k) * 0.02)
         self.channel_coeffs = nn.Parameter(torch.randn(d_model, self.num_bases))
-        
+
         self.register_buffer('last_neighbor_indices', None)
 
     def forward(self, z, neighbor_indices):
-        """z: (B, N, T, C), neighbor_indices: (N, k_curr)"""
         B, N, T, C = z.shape
         k_curr = neighbor_indices.size(1)
-        
-        # Cache for visualization
+
         self.last_neighbor_indices = neighbor_indices
 
-        if k_curr > self.max_k: 
+        if k_curr > self.max_k:
             neighbor_indices = neighbor_indices[:, :self.max_k]
             k_curr = self.max_k
-        
-        # Dynamic slicing
+
         bases = self.basis_weights[:, :, :k_curr]
         adj = self.adjacency[:, :k_curr]
-        
-        # W_eff = Coeffs @ Bases -> (C, N, k)
+
         eff_weights = torch.einsum('ck,knm->cnm', self.channel_coeffs, bases)
         edge_weights = eff_weights * adj.unsqueeze(0)
-        
-        # Gather neighbors using fancy indexing
-        flat_indices = neighbor_indices.view(-1) # (N*k)
-        z_flat = z.view(B, N, -1) # (B, N, T*C)
+
+        flat_indices = neighbor_indices.view(-1)
+        z_flat = z.view(B, N, -1)
         z_neigh_flat = z_flat[:, flat_indices, :]
         z_neigh = z_neigh_flat.view(B, N, k_curr, T, C)
-        
-        # Weighted Sum
+
         w_aligned = edge_weights.permute(1, 2, 0).unsqueeze(0).unsqueeze(3)
         z_out = (z_neigh * w_aligned).sum(dim=2)
-        
+
         return torch.tanh(z_out)
 
     def get_soft_graph(self):
-        """Reconstruct dense NxN adjacency."""
-        if self.last_neighbor_indices is None: return None
-        
+        if self.last_neighbor_indices is None:
+            return None
+
         with torch.no_grad():
             indices = self.last_neighbor_indices
             k = indices.size(1)
@@ -115,17 +98,13 @@ class CausalGraphLayer(nn.Module):
             W = torch.einsum('ck,knm->cnm', self.channel_coeffs, bases)
             W_mag = W.abs().mean(dim=0)
             sparse_w = self.adjacency[:, :k].abs() * W_mag
-            
+
             dense = torch.zeros(self.N, self.N, device=self.adjacency.device)
             dense.scatter_(1, indices, sparse_w)
-            return dense
+            return dense.T
 
     def structural_l1_loss(self):
         return torch.sum(torch.abs(self.adjacency))
-
-# ==========================================
-# 3. GeoDCD Layer
-# ==========================================
 
 class GeoDCDLayer(nn.Module):
     def __init__(self, N, d_model=64, nhead=4, num_layers=2, num_bases=4, max_k=32):
@@ -144,61 +123,57 @@ class GeoDCDLayer(nn.Module):
         ).view(B, N, T-1)
         return x_recon, x_pred, z
 
-# ==========================================
-# 4. Pooling Layer
-# ==========================================
-
 class GeometricPooler(nn.Module):
-    def __init__(self, num_patches):
+    def __init__(self, num_patches, shift_scale=0.1):
         super().__init__()
         self.num_patches = num_patches
+        self.shift_scale = shift_scale
         self.register_buffer('S_matrix', None)
-        self.initialized = False
 
-    def init_structure(self, coords):
-        if self.initialized: return
+    def get_structure(self, coords, training=False):
         coords_np = coords.detach().float().cpu().numpy()
         c_mean = coords_np.mean(axis=0)
         c_std = coords_np.std(axis=0) + 1e-5
         coords_norm = (coords_np - c_mean) / c_std
-        kmeans = KMeans(n_clusters=self.num_patches, n_init=20, random_state=42)
+
+        if training:
+            shift = np.random.randn(*coords_norm.shape) * self.shift_scale
+            coords_norm += shift
+
+        kmeans = MiniBatchKMeans(n_clusters=self.num_patches, random_state=None)
         labels = kmeans.fit_predict(coords_norm)
+
         N = coords.shape[0]
         S_hard = torch.zeros(N, self.num_patches, device=coords.device)
         labels_tensor = torch.tensor(labels, device=coords.device).long()
         S_hard.scatter_(1, labels_tensor.unsqueeze(1), 1.0)
-        self.S_matrix = S_hard
-        self.initialized = True
-        print(f"🔲 Geometric Window Initialized: N={N} -> K={self.num_patches}")
+
+        return S_hard
 
     def forward(self, x, coords):
-        if not self.initialized: self.init_structure(coords)
-        return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
-
-# ==========================================
-# 5. Main Model (Soft Constrained Top-Down)
-# ==========================================
+        if self.training:
+            S = self.get_structure(coords, training=True)
+            self.S_matrix = S
+            return S.unsqueeze(0).expand(x.shape[0], -1, -1)
+        else:
+            if self.S_matrix is None:
+                self.S_matrix = self.get_structure(coords, training=False)
+            return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, max_k=32, penalty_factor=5.0):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
-        self.max_k = 32 
-        
-        # Soft Penalty Factor: 
-        # A value of 5.0 means unconnected parent regions are effectively 
-        # "pushed away" by 6x their original distance.
-        # This preserves local neighbors (0.1 * 6 = 0.6, still close)
-        # but suppresses far ones (2.0 * 6 = 12.0, pushed out of TopK)
-        self.penalty_factor = 5.0 
-        
+        self.max_k = max_k
+        self.penalty_factor = penalty_factor
+
         coords = torch.tensor(coords).float() if not torch.is_tensor(coords) else coords
         self.register_buffer('coords', coords)
-        
+
         self.layers = nn.ModuleList()
         self.poolers = nn.ModuleList()
-        
+
         for i in range(self.num_levels):
             current_max_k = min(self.max_k, self.dims[i])
             self.layers.append(
@@ -212,29 +187,22 @@ class GeoDCD(nn.Module):
         return sum(layer.graph.structural_l1_loss() for layer in self.layers)
 
     def _get_knn_indices(self, coords, k, coarse_graph=None, structure_S=None):
-        # 1. Physical Distances
         dists = torch.cdist(coords, coords)
-        
-        # 2. Top-Down Soft Constraint
+
         if (coarse_graph is not None) and (structure_S is not None):
             parents = structure_S.argmax(dim=1)
-            # Use lower threshold to capture weak signals
-            coarse_bin = (coarse_graph > 0.001).float() 
+            coarse_bin = (coarse_graph > 0.001).float()
             prior_mask = coarse_bin[parents][:, parents]
-            
-            # Ensure self-block connectivity
+
             same_parent = (parents.unsqueeze(1) == parents.unsqueeze(0)).float()
             prior_mask = torch.max(prior_mask, same_parent)
-            
-            # Apply Multiplicative Penalty
-            # D_new = D_old * (1 + beta * (1 - Mask))
+
             penalty = 1.0 + self.penalty_factor * (1.0 - prior_mask)
             dists = dists * penalty
 
-        # 3. Select Top-K
         if self.training and coarse_graph is None:
              dists = dists + torch.randn_like(dists) * 0.01
-             
+
         k = min(k, coords.shape[0])
         _, indices = torch.topk(dists, k, dim=1, largest=False)
         return indices

@@ -1,0 +1,60 @@
+program: src/run.py
+method: grid
+metric:
+  name: AUROC
+  goal: maximize
+
+parameters:
+  # --- Data ---
+  dataset:
+    value: Finance
+  data_path:
+    value: data/real
+  replica_id:
+    value: 0
+  N:
+    value: 25
+  
+  # --- Model Structure ---
+  hierarchy:
+    values: 
+      - [8]
+      - [4]
+  
+  d_model:
+    values: [32, 64]   # 搜索隐层维度
+  
+  num_bases:
+    value: 4
+
+  # --- Training Strategy ---
+  batch_size:
+    value: 64
+  epochs:
+    value: 50
+  lr:
+    values: [0.001, 0.0005]  # 搜索学习率
+  lambda_l1:
+    values: [0.0001, 0.001]  # 搜索稀疏惩罚力度，这对 AUROC 影响很大
+  seed:
+    value: 42
+
+  # --- Evaluation ---
+  num_frames:
+    value: 300
+
+  # --- Logging ---
+  project_name:
+    value: "GeoDCD_Sweep_AUROC"
+  output_dir:
+    value: "./results_sweep"
+
+command:
+  - ${env}
+  - accelerate
+  - launch
+  - --config_file
+  - accelerate_config.yaml
+  - ${program}
+  - ${args}
+  - --dynamic

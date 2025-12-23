@@ -4,4 +4,5 @@ accelerate launch src/run.py \
     --N 716 \
     --hierarchy 32 8 \
     --window_size 13 \
-    --batch_size 8
+    --batch_size 32 \
+    --dynamic
