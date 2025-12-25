@@ -119,7 +119,7 @@ class GeoDCDLayer(nn.Module):
         return x_pred, z
 
 class GeometricPooler(nn.Module):
-    def __init__(self, num_patches, shift_scale=0.1):
+    def __init__(self, num_patches, shift_scale):
         super().__init__()
         self.num_patches = num_patches
         self.shift_scale = shift_scale
@@ -156,12 +156,13 @@ class GeometricPooler(nn.Module):
             return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0, max_k=100):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0, max_k=100, shift_scale=0.1):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)
         self.penalty_factor = penalty_factor
         self.max_k = max_k
+        self.shift_scale = shift_scale
 
         coords = torch.tensor(coords).float() if not torch.is_tensor(coords) else coords
         self.register_buffer('coords', coords)
@@ -174,7 +175,7 @@ class GeoDCD(nn.Module):
                 GeoDCDLayer(self.dims[i], d_model, num_bases=num_bases, max_k=self.max_k)
             )
             if i < self.num_levels - 1:
-                self.poolers.append(GeometricPooler(self.dims[i+1]))
+                self.poolers.append(GeometricPooler(self.dims[i+1], shift_scale))
                 self.register_buffer(f'structure_S_{i}', torch.zeros(self.dims[i], self.dims[i+1]))
     
     def get_structural_l1_loss(self):

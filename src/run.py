@@ -72,7 +72,8 @@ def main(args):
         hierarchy=args.hierarchy,
         d_model=args.d_model,
         num_bases=args.num_bases,
-        penalty_factor=args.penalty_factor
+        penalty_factor=args.penalty_factor,
+        shift_scale=args.shift_scale
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -132,6 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--num_bases", type=int, default=4)
     parser.add_argument("--penalty_factor", type=float, default=5.0)
+    parser.add_argument("--shift_scale", type=float, default=0.1)
     
     # Training
     parser.add_argument("--batch_size", type=int, default=64)
