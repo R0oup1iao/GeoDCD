@@ -1,15 +1,21 @@
-# accelerate launch src/run.py \
-#     --dataset GBA \
-#     --data_path data/real \
-#     --N 2352 \
-#     --hierarchy 512 64 8 \
-#     --window_size 12 \
-#     --batch_size 8
+#!/bin/zsh
+set -e
+SCRIPT_DIR="${0:a:h}"
 
-accelerate launch src/run.py \
-    --dataset GLA \
-    --data_path data/real \
-    --N 3834 \
-    --hierarchy 64 8 \
-    --batch_size 4 \
-    --epochs 50
+tasks=(
+    "lorenz96.sh"
+    "cluster_lorenz.sh"
+    "Finance.sh"
+    "var.sh"
+)
+
+# 3. 循环遍历执行
+for task in "${tasks[@]}"; do
+    echo "🚀 [Start] Running task: $task ..."
+    zsh "$SCRIPT_DIR/$task"
+    
+    echo "✅ [End] Finished: $task"
+    echo "------------------------------------------"
+done
+
+echo "🎉 All experiments completed successfully!"

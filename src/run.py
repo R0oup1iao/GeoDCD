@@ -48,11 +48,11 @@ def main(args):
     set_seed(args.seed)
 
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    args.output_dir = os.path.join(args.output_dir, args.dataset, timestamp)
+    args.output_dir = os.path.join(args.output_dir, args.dataset, f"{timestamp}-{args.dataset}-{args.replica_id}-GeoDCD")
 
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
-        run_name = f"{args.dataset}-GeoDCD-{timestamp}"
+        run_name = f"{args.dataset}-{args.replica_id}-GeoDCD-{timestamp}"
         accelerator.init_trackers(project_name=args.project_name, config=vars(args),
                                 init_kwargs={"wandb": {"name": run_name}})
         accelerator.print(f"Experiment: {args.dataset} | Out: {args.output_dir}")
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     
     # Training
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lambda_l1", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
