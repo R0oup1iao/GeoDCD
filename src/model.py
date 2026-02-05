@@ -156,7 +156,7 @@ class GeometricPooler(nn.Module):
             return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 class GeoDCD(nn.Module):
-    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0, max_k=100, shift_scale=0.1):
+    def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0, max_k=32, shift_scale=0.1):
         super().__init__()
         self.dims = [N] + hierarchy
         self.num_levels = len(self.dims)

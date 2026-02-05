@@ -4,4 +4,5 @@ accelerate launch src/run.py \
     --N 2352 \
     --hierarchy 128 32 8 \
     --window_size 13 \
-    --batch_size 8
+    --batch_size 4 \
+    --epochs 20
