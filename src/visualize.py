@@ -43,8 +43,12 @@ def create_dynamic_gif(dynamic_adj, save_path, fps=10):
     fig, ax = plt.subplots(figsize=(10, 8))
 
     vmax = np.percentile(dynamic_adj, 99)
+    if vmax <= 0:
+        vmax = dynamic_adj.max()
+    if vmax <= 0:
+        vmax = 1.0 # Fallback if all zeros
     vmin = 0
-
+    
     im = ax.imshow(dynamic_adj[:, :, 0], cmap='hot', vmin=vmin, vmax=vmax, interpolation='nearest')
     title = ax.set_title(f"动态因果强度 (t=0)")
     ax.set_xlabel("源变量")
@@ -79,6 +83,10 @@ def save_dynamic_frames_pdf(dynamic_adj, save_path):
     indices = np.linspace(0, T - 1, 8, dtype=int)
     
     vmax = np.percentile(dynamic_adj, 99)
+    if vmax <= 0:
+        vmax = dynamic_adj.max()
+    if vmax <= 0:
+        vmax = 1.0 # Fallback if all zeros
     vmin = 0
     
     # 确保保存目录存在

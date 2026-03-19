@@ -122,7 +122,7 @@ def run_dynamic_inference(model, args, accelerator):
     if not accelerator.is_main_process:
         return
 
-    accelerator.print(f"\nComputing Dynamic Graph...")
+    accelerator.print(f"\n🚀 Computing Optimized Sparse Dynamic Graph (N={args.N})...")
     try:
         base_path = getattr(args, 'data_path', 'data/synthetic')
         data_np, _, _ = load_from_disk(base_path, args.dataset, args.replica_id)
@@ -136,20 +136,22 @@ def run_dynamic_inference(model, args, accelerator):
         )
         full_loader = torch.utils.data.DataLoader(full_ds, batch_size=1, shuffle=False)
 
-        all_frames = []
+        sparse_indices = []
+        sparse_values = []
         max_frames = args.num_frames
         frames_generated = 0
 
-        pbar = tqdm(total=max_frames, desc="Generating Frames", unit="frames")
+        pbar = tqdm(total=max_frames, desc="Sparse Inference", unit="frames")
 
         for batch in full_loader:
-            batch = batch.to(accelerator.device)
+            batch = batch.to(accelerator.device) # (1, N, T)
 
-            curr_adj = compute_dynamic_strengths(model, batch, accelerator.device)
+            with torch.no_grad():
+                # inds: (1, N, K), vals: (1, N, K, T)
+                inds, vals = model.forward_dynamic_sparse(batch)
 
-            curr_frame = curr_adj.mean(dim=2).numpy()
-
-            all_frames.append(curr_frame)
+            sparse_indices.append(inds.cpu().numpy().astype(np.int32))
+            sparse_values.append(vals.cpu().numpy().astype(np.float16))
 
             pbar.update(1)
             frames_generated += 1
@@ -159,24 +161,78 @@ def run_dynamic_inference(model, args, accelerator):
 
         pbar.close()
 
-        if not all_frames:
-            accelerator.print("No frames generated (Data might be too short).")
+        if not sparse_indices:
+            accelerator.print("No data generated.")
             return
 
-        final_dynamic_adj = np.stack(all_frames, axis=2)
+        # Stack/Concatenate results
+        # vals: (1, N, K, T) -> all_values: (B, N, K, T)
+        # inds: (N, K) -> all_indices: (B*N, K)
+        all_values = np.concatenate(sparse_values, axis=0)   # (B, N, K, T)
+        all_indices = np.concatenate(sparse_indices, axis=0) # (B*N, K)
+        
+        # Reshape indices to (B, N, K) for consistent indexing
+        all_indices = all_indices.reshape(all_values.shape[0], all_values.shape[1], -1)
+        
+        # Save as compressed npz
+        save_path = os.path.join(args.output_dir, "est_dynamic_sparse.npz")
+        np.savez_compressed(save_path, indices=all_indices, values=all_values)
+        
+        accelerator.print(f"✅ Sparse Dynamic Graph Saved: {save_path}")
+        accelerator.print(f"   Shape: Indices {all_indices.shape}, Values {all_values.shape}")
+        accelerator.print(f"   Storage: ~{all_values.nbytes / 1024**2:.2f} MB")
 
-        np.save(os.path.join(args.output_dir, "est_dynamic.npy"), final_dynamic_adj)
+        # Visualization: Sample 1000 nodes if N is large
+        vis_threshold = 1000
+        if args.N > vis_threshold:
+            accelerator.print(f"Sampling {vis_threshold} random nodes for visualization (N={args.N})...")
+            np.random.seed(42)
+            node_indices = np.random.choice(args.N, vis_threshold, replace=False)
+            node_indices.sort()
+        else:
+            node_indices = np.arange(args.N)
 
+        accelerator.print(f"Generating visualization for {len(node_indices)} nodes...")
+        
+        # Convert sparse to dense mean frame for visualization
+        B, N, K, T = all_values.shape
+        total_T = B * T
+        vis_T = min(total_T, 100)
+        
+        N_vis = len(node_indices)
+        # Reconstruct dense subset sequence (N_vis, N_vis, vis_T)
+        dense_seq = np.zeros((N_vis, N_vis, vis_T))
+        
+        # Create map from original node index to subset index
+        orig_to_sub = {orig: sub for sub, orig in enumerate(node_indices)}
+        
+        frame_idx = 0
+        for b in range(B):
+            if frame_idx >= vis_T: break
+            for t in range(T):
+                if frame_idx >= vis_T: break
+                for sub_i, orig_i in enumerate(node_indices):
+                    # For each visualized node orig_i, find its neighbors that are also in the subset
+                    neigh_indices_orig = all_indices[b, orig_i] # Now shape (K,)
+                    neigh_vals = all_values[b, orig_i, :, t]    # Shape (K,)
+                    
+                    for k in range(K):
+                        orig_j = int(neigh_indices_orig[k])
+                        if orig_j in orig_to_sub:
+                            sub_j = orig_to_sub[orig_j]
+                            dense_seq[sub_i, sub_j, frame_idx] = neigh_vals[k]
+                frame_idx += 1
+        
         gif_path = os.path.join(args.output_dir, "causal_evolution.gif")
-        vis_adj = final_dynamic_adj / (final_dynamic_adj.max() + 1e-9)
+        vis_adj = dense_seq / (dense_seq.max() + 1e-9)
         create_dynamic_gif(vis_adj, gif_path, fps=8)
-
+        
         pdf_path = os.path.join(args.output_dir, "causal_evolution.pdf")
         save_dynamic_frames_pdf(vis_adj, pdf_path)
-
+        
         if wandb.run is not None:
             wandb.log({"dynamic_evolution": wandb.Video(gif_path, fps=8, format="gif")})
-        accelerator.print(f"Dynamic inference finished. GIF saved to {gif_path}")
+        accelerator.print(f"Visualization saved to {gif_path}")
 
     except Exception as e:
         accelerator.print(f"Dynamic inference failed: {e}")

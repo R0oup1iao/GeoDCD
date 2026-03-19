@@ -83,6 +83,47 @@ class CausalGraphLayer(nn.Module):
 
         return torch.tanh(z_out)
 
+    def get_sparse_dynamic_weights(self, z, neighbor_indices):
+        """
+        Calculates sparse dynamic weights analytically.
+        Complexity: O(N * K * T)
+        """
+        B, N, T, C = z.shape
+        k_curr = neighbor_indices.size(1)
+
+        # 1. Get Static Weights
+        bases = self.basis_weights[:, :, :k_curr]
+        adj = self.adjacency[:, :k_curr]
+
+        # eff_weights: (C, N, K)
+        eff_weights = torch.einsum('ck,knm->cnm', self.channel_coeffs, bases)
+        static_edge_weights = eff_weights * adj.unsqueeze(0) # (C, N, K)
+
+        # 2. Get Neighbor Features
+        flat_indices = neighbor_indices.view(-1)
+        z_flat = z.view(B, N, -1) # (B, N, T*C)
+        z_neigh_flat = z_flat[:, flat_indices, :] 
+        z_neigh = z_neigh_flat.view(B, N, k_curr, T, C) # (B, N, K, T, C)
+
+        # 3. Align Weights
+        # w_aligned: (1, N, K, 1, C) -> Broadcast to (B, N, K, T, C)
+        w_aligned = static_edge_weights.permute(1, 2, 0).unsqueeze(0).unsqueeze(3)
+
+        # 4. Calculate Pre-activation
+        z_out = (z_neigh * w_aligned).sum(dim=2) # (B, N, T, C)
+
+        # 5. Calculate Tanh Derivative (Modulation)
+        tanh_grad = 1.0 - torch.tanh(z_out).pow(2) # (B, N, T, C)
+
+        # 6. Combine: Dynamic = Static * Modulation
+        # (B, N, 1, T, C) * (1, N, K, 1, C) -> (B, N, K, T, C)
+        dynamic_W_full = tanh_grad.unsqueeze(2) * w_aligned
+
+        # Average over Channels
+        dynamic_vals = dynamic_W_full.abs().mean(dim=-1) # (B, N, K, T)
+
+        return neighbor_indices, dynamic_vals
+
     def get_soft_graph(self):
         if self.last_neighbor_indices is None:
             return None
@@ -242,3 +283,26 @@ class GeoDCD(nn.Module):
             }
             
         return [results_dict[i] for i in range(self.num_levels)]
+
+    def forward_dynamic_sparse(self, x):
+        """
+        Specialized interface for fast sparse dynamic inference on the finest level.
+        """
+        B, N, T = x.shape
+        layer0 = self.layers[0]
+
+        # 1. Get KNN mask for Level 0
+        mask = self._get_knn_indices(
+            coords=self.coords,
+            coarse_graph=None,
+            structure_S=None,
+            max_k=layer0.graph.max_k
+        )
+
+        # 2. Run Geo Encoder to get z
+        z = layer0.geo_encoder(x.reshape(B*N, T, 1)).view(B, N, T, -1)
+
+        # 3. Compute sparse dynamic weights
+        indices, values = layer0.graph.get_sparse_dynamic_weights(z, mask)
+
+        return indices, values
