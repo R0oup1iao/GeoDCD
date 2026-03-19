@@ -119,23 +119,18 @@ class GeoDCDLayer(nn.Module):
         return x_pred, z
 
 class GeometricPooler(nn.Module):
-    def __init__(self, num_patches, shift_scale):
+    def __init__(self, num_patches, shift_scale=0.1):
         super().__init__()
         self.num_patches = num_patches
-        self.shift_scale = shift_scale
+        # shift_scale 参数被保留以兼容 GeoDCD 的调用，但在此实现中不再使用
         self.register_buffer('S_matrix', None)
 
-    def get_structure(self, coords, training=False):
+    def get_structure(self, coords):
         coords_np = coords.detach().float().cpu().numpy()
         c_mean = coords_np.mean(axis=0)
         c_std = coords_np.std(axis=0) + 1e-5
         coords_norm = (coords_np - c_mean) / c_std
-
-        if training:
-            shift = np.random.randn(*coords_norm.shape) * self.shift_scale
-            coords_norm += shift
-
-        kmeans = KMeans(n_clusters=self.num_patches, random_state=None)
+        kmeans = KMeans(n_clusters=self.num_patches, random_state=42)
         labels = kmeans.fit_predict(coords_norm)
 
         N = coords.shape[0]
@@ -146,14 +141,10 @@ class GeometricPooler(nn.Module):
         return S_hard
 
     def forward(self, x, coords):
-        if self.training:
-            S = self.get_structure(coords, training=True)
-            self.S_matrix = S
-            return S.unsqueeze(0).expand(x.shape[0], -1, -1)
-        else:
-            if self.S_matrix is None:
-                self.S_matrix = self.get_structure(coords, training=False)
-            return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
+        if self.S_matrix is None:
+            self.S_matrix = self.get_structure(coords)
+            
+        return self.S_matrix.unsqueeze(0).expand(x.shape[0], -1, -1)
 
 class GeoDCD(nn.Module):
     def __init__(self, N, coords, hierarchy=[32, 8], d_model=64, num_bases=4, penalty_factor=5.0, max_k=32, shift_scale=0.1):

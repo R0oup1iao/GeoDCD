@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 
 from model import GeoDCD 
 from dataloader import get_data_context, load_from_disk, CausalTimeSeriesDataset
-from visualize import create_dynamic_gif
+from visualize import create_dynamic_gif, save_dynamic_frames_pdf
 from metrics import count_accuracy
 
 def compute_dynamic_strengths(model, x, device):
@@ -170,6 +170,9 @@ def run_dynamic_inference(model, args, accelerator):
         gif_path = os.path.join(args.output_dir, "causal_evolution.gif")
         vis_adj = final_dynamic_adj / (final_dynamic_adj.max() + 1e-9)
         create_dynamic_gif(vis_adj, gif_path, fps=8)
+
+        pdf_path = os.path.join(args.output_dir, "causal_evolution.pdf")
+        save_dynamic_frames_pdf(vis_adj, pdf_path)
 
         if wandb.run is not None:
             wandb.log({"dynamic_evolution": wandb.Video(gif_path, fps=8, format="gif")})
